@@ -382,7 +382,7 @@ document.getElementById("downloadZipBtn").addEventListener("click", async () => 
   }
 
   const audioQualitySelect = document.getElementById("audioQualitySelect");
-  const audioQuality = audioQualitySelect ? audioQualitySelect.value : "mp3_320";
+  const audioQuality = audioQualitySelect ? audioQualitySelect.value : "mp3_192";
 
   const totalTracks = selected.reduce((sum, m) => sum + m.tracks.length, 0);
   if (totalTracks > 40) {
@@ -396,7 +396,7 @@ document.getElementById("downloadZipBtn").addEventListener("click", async () => 
   modalErrorBox.classList.add("hidden");
   modalProgressBar.style.width = "0%";
   modalPercentage.innerText = "0%";
-  const qualityLabel = audioQuality === "flac" ? "Lossless FLAC" : (audioQuality === "mp3_320" ? "320 kbps MP3" : "192 kbps MP3");
+  const qualityLabel = audioQuality === "flac" ? "Lossless FLAC" : (audioQuality === "mp3_320" ? "320 kbps MP3" : "Fast MP3 Full Songs");
   modalCurrentTrack.innerText = `Starting parallel download (${qualityLabel})...`;
   modalCounts.innerText = `0 / ${totalTracks} tracks`;
   lucide.createIcons();

@@ -182,16 +182,15 @@
           <!-- Audio Quality Selector -->
           <div class="flex items-center gap-1.5">
             <select id="audioQualitySelect" class="bg-slate-800 text-slate-200 border border-slate-700 text-xs rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-medium cursor-pointer">
-              <option value="fast" selected>⚡ Ultra-Fast (~3s - Instant Download)</option>
-              <option value="mp3_320">🎵 320 kbps MP3 (Full Tracks)</option>
-              <option value="flac">💎 Lossless FLAC (Studio Quality)</option>
-              <option value="mp3_192">192 kbps MP3 (Standard)</option>
+              <option value="mp3_192" selected>🎵 Full Songs (MP3 - Fast Download)</option>
+              <option value="mp3_320">⚡ Full Songs (320 kbps High Quality MP3)</option>
+              <option value="flac">💎 Full Songs (Lossless FLAC)</option>
             </select>
 
             <!-- Audio ZIP Download Button -->
             <button id="downloadZipBtn" class="px-4 py-1.5 rounded-lg bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 text-white text-xs font-semibold shadow-md shadow-pink-500/20 transition flex items-center gap-1.5">
               <i data-lucide="archive" class="w-3.5 h-3.5"></i>
-              Download ZIP
+              Download Full Songs ZIP
             </button>
           </div>
         </div>

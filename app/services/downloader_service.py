@@ -74,24 +74,12 @@ def download_cover_image(artwork_url: Optional[str], dest_folder: str) -> Option
         return None
 
 def download_single_track(track: Track, movie_folder: str, audio_quality: str, cover_path: Optional[str] = None) -> bool:
-    """Download a single track in requested quality (fast direct stream, FLAC, or MP3)."""
+    """Download a single full-length track in requested quality (FLAC, MP3 320k, or Fast MP3 192k)."""
     safe_title = sanitize_filename(track.title)
     
-    # 1. ULTRA-FAST DIRECT STREAM MODE (~0.5s per song)
-    if audio_quality == "fast" and track.preview_url:
-        ext = "m4a" if ".m4a" in track.preview_url or "aac" in track.preview_url else "mp3"
-        final_file = os.path.join(movie_folder, f"{track.track_number:02d} - {safe_title}.{ext}")
-        if os.path.exists(final_file) and os.path.getsize(final_file) > 1000:
-            return True
-        try:
-            req = urllib.request.Request(track.preview_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10.0) as resp:
-                with open(final_file, "wb") as f:
-                    f.write(resp.read())
-            if os.path.exists(final_file) and os.path.getsize(final_file) > 1000:
-                return True
-        except Exception as e:
-            print(f"Direct stream download failed for {track.title}: {e}")
+    # Map any legacy "fast" setting to high-speed full-length 192kbps MP3 (NO 30-sec previews)
+    if audio_quality == "fast":
+        audio_quality = "mp3_192"
 
     # Determine codec and file extension
     if audio_quality == "flac":
@@ -106,7 +94,7 @@ def download_single_track(track: Track, movie_folder: str, audio_quality: str, c
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"},
             {"key": "FFmpegMetadata"}
         ]
-    else:  # mp3_192 or fallback
+    else:  # mp3_192 (Fast Full Songs) or fallback
         target_ext = "mp3"
         postprocessors = [
             {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
@@ -114,55 +102,66 @@ def download_single_track(track: Track, movie_folder: str, audio_quality: str, c
         ]
 
     final_file = os.path.join(movie_folder, f"{track.track_number:02d} - {safe_title}.{target_ext}")
-    if os.path.exists(final_file) and os.path.getsize(final_file) > 10000:
+    if os.path.exists(final_file) and os.path.getsize(final_file) > 500000:
         return True
 
-    # 2. Fast YouTube Search with short 7-second timeout and 0 retries (prevents cloud stalls)
-    query = f"ytsearch1:{track.movie} {track.title} {track.artist} audio"
+    # Check if any valid full audio file exists for this track number and title
+    if os.path.exists(movie_folder):
+        for f in os.listdir(movie_folder):
+            if f.startswith(f"{track.track_number:02d} - {safe_title}.") and f.endswith(('.mp3', '.flac', '.m4a', '.wav', '.opus', '.aac')):
+                fpath = os.path.join(movie_folder, f)
+                if os.path.getsize(fpath) > 500000:
+                    return True
+
     output_tmpl = os.path.join(movie_folder, f"{track.track_number:02d} - {safe_title}.%(ext)s")
 
+    # yt-dlp pure audio extraction configuration (Fast stream, full track)
     ydl_opts = {
-        "format": "bestaudio/best",
+        "format": "ba/b[ext=m4a]/ba*/best",
         "outtmpl": output_tmpl,
         "postprocessors": postprocessors,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "default_search": "ytsearch1",
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "ios", "web_embedded", "mweb"],
-                "player_skip": ["configs"],
-            }
-        },
         "ignoreerrors": True,
-        "concurrent_fragment_downloads": 2,
-        "socket_timeout": 7,
-        "retries": 0,
-        "fragment_retries": 0,
+        "socket_timeout": 15,
+        "retries": 1,
+        "fragment_retries": 1,
     }
+
+    # Primary search query: Movie + Song Title + Artist + audio
+    artist_part = f" {track.artist}" if track.artist and "various" not in track.artist.lower() else ""
+    primary_query = f"ytsearch1:{track.movie} {track.title}{artist_part} audio"
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([query])
+            ydl.download([primary_query])
     except Exception as e:
-        print(f"YouTube search skipped/failed for {track.title}: {e}")
+        print(f"Primary audio search failed for {track.title}: {e}")
 
-    if os.path.exists(final_file) and os.path.getsize(final_file) > 10000:
-        return True
+    # Check if download succeeded (>500KB indicates full song, not a short snippet)
+    if os.path.exists(movie_folder):
+        for f in os.listdir(movie_folder):
+            if f.startswith(f"{track.track_number:02d} - {safe_title}.") and f.endswith(('.mp3', '.flac', '.m4a', '.wav', '.opus', '.aac')):
+                fpath = os.path.join(movie_folder, f)
+                if os.path.getsize(fpath) > 500000:
+                    return True
 
-    # 3. Instant Fallback to Direct Stream if YouTube is blocked or slow
-    if track.preview_url:
-        fallback_file = os.path.join(movie_folder, f"{track.track_number:02d} - {safe_title}.m4a")
-        try:
-            req = urllib.request.Request(track.preview_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10.0) as resp:
-                with open(fallback_file, "wb") as f:
-                    f.write(resp.read())
-            if os.path.exists(fallback_file) and os.path.getsize(fallback_file) > 1000:
-                return True
-        except Exception as e:
-            print(f"Fallback stream error for {track.title}: {e}")
+    # Fallback search query if primary query didn't yield a file: Movie + Title + song
+    fallback_query = f"ytsearch1:{track.movie} {track.title} song"
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([fallback_query])
+    except Exception as e:
+        print(f"Fallback audio search failed for {track.title}: {e}")
+
+    if os.path.exists(movie_folder):
+        for f in os.listdir(movie_folder):
+            if f.startswith(f"{track.track_number:02d} - {safe_title}.") and f.endswith(('.mp3', '.flac', '.m4a', '.wav', '.opus', '.aac')):
+                fpath = os.path.join(movie_folder, f)
+                if os.path.getsize(fpath) > 500000:
+                    return True
 
     return False
 
@@ -248,7 +247,12 @@ def process_download_job(task_id: str, results: List[MovieResult], audio_quality
         task["current_track"] = f"Compressing {len(downloaded_audio)} songs into final ZIP archive..."
         task["progress"] = 93
 
-        quality_suffix = "FLAC_Lossless" if audio_quality == "flac" else "320kbps_MP3"
+        if audio_quality == "flac":
+            quality_suffix = "FLAC_Lossless"
+        elif audio_quality == "mp3_320":
+            quality_suffix = "320kbps_MP3"
+        else:
+            quality_suffix = "FullSongs_MP3"
         zip_filename = f"soundtracks_{quality_suffix}_{task_id[:8]}.zip"
         zip_path = os.path.join(DOWNLOAD_DIR, zip_filename)
 
@@ -283,7 +287,7 @@ def process_download_job(task_id: str, results: List[MovieResult], audio_quality
         task["status"] = "failed"
         task["error"] = f"Packaging error: {str(e)}"
 
-def start_audio_zip_task(results: List[MovieResult], audio_quality: str = "mp3_320") -> str:
+def start_audio_zip_task(results: List[MovieResult], audio_quality: str = "mp3_192") -> str:
     """Start asynchronous audio download and zip creation."""
     task_id = str(uuid.uuid4())
     TASKS[task_id] = {

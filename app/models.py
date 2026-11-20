@@ -42,4 +42,4 @@ class ExportTracklistRequest(BaseModel):
 
 class DownloadAudioRequest(BaseModel):
     results: List[MovieResult]
-    audio_quality: str = "mp3_320"  # flac, mp3_320, mp3_192
+    audio_quality: str = "mp3_192"  # flac, mp3_320, mp3_192
