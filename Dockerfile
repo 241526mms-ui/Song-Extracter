@@ -22,7 +22,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source code
 COPY app/ ./app/
-COPY tests/ ./tests/
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && \
