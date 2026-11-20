@@ -130,8 +130,8 @@ def download_single_track(track: Track, movie_folder: str, audio_quality: str, c
         except Exception:
             pass
 
-    # Fast YouTube search and extraction
-    query = f"{track.movie} {track.title} {track.artist} audio"
+    # Primary: Fast YouTube search and extraction with mobile player clients for cloud compatibility
+    query = f"ytsearch1:{track.movie} {track.title} {track.artist} audio"
     output_tmpl = os.path.join(movie_folder, f"{track.track_number:02d} - {safe_title}.%(ext)s")
 
     ydl_opts = {
@@ -142,6 +142,12 @@ def download_single_track(track: Track, movie_folder: str, audio_quality: str, c
         "no_warnings": True,
         "noplaylist": True,
         "default_search": "ytsearch1",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "web_embedded", "mweb"],
+                "player_skip": ["configs"],
+            }
+        },
         "ignoreerrors": True,
         "concurrent_fragment_downloads": 4,
         "socket_timeout": 20,
@@ -152,12 +158,36 @@ def download_single_track(track: Track, movie_folder: str, audio_quality: str, c
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([query])
-        return os.path.exists(final_file) and os.path.getsize(final_file) > 10000
     except Exception as e:
-        if os.path.exists(final_file) and os.path.getsize(final_file) > 10000:
-            return True
-        print(f"Error downloading {track.title}: {e}")
-        return False
+        print(f"Error downloading {track.title} via YouTube: {e}")
+
+    if os.path.exists(final_file) and os.path.getsize(final_file) > 10000:
+        return True
+
+    # Secondary fallback: search SoundCloud via yt-dlp
+    try:
+        sc_query = f"scsearch1:{track.movie} {track.title}"
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([sc_query])
+    except Exception:
+        pass
+
+    if os.path.exists(final_file) and os.path.getsize(final_file) > 10000:
+        return True
+
+    # Tertiary fallback: Download audio from track.preview_url directly
+    if track.preview_url:
+        try:
+            req = urllib.request.Request(track.preview_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15.0) as resp:
+                with open(final_file, "wb") as f:
+                    f.write(resp.read())
+            if os.path.exists(final_file) and os.path.getsize(final_file) > 1000:
+                return True
+        except Exception as e:
+            print(f"Stream fallback error for {track.title}: {e}")
+
+    return False
 
 def process_download_job(task_id: str, results: List[MovieResult], audio_quality: str):
     """Background worker downloading all tracks in parallel and packaging with cover art into a ZIP."""
@@ -224,9 +254,21 @@ def process_download_job(task_id: str, results: List[MovieResult], audio_quality
             task["current_track"] = f"Finished: {track.movie} - {track.title}"
             task["progress"] = int((completed / total) * 90)
 
-    # Step 3: Create ZIP archive
+    # Step 3: Verify audio files were downloaded and create ZIP archive
+    downloaded_audio = []
+    for root, _, files in os.walk(task_workspace):
+        for f in files:
+            if f.endswith(('.mp3', '.flac', '.m4a', '.wav')) and not f.startswith('.'):
+                downloaded_audio.append(f)
+
+    if not downloaded_audio:
+        task["status"] = "failed"
+        task["error"] = "No audio tracks could be downloaded from streaming sources. Please check your connection and retry."
+        shutil.rmtree(task_workspace, ignore_errors=True)
+        return
+
     try:
-        task["current_track"] = "Compressing files into final ZIP archive..."
+        task["current_track"] = f"Compressing {len(downloaded_audio)} songs into final ZIP archive..."
         task["progress"] = 93
 
         quality_suffix = "FLAC_Lossless" if audio_quality == "flac" else "320kbps_MP3"
