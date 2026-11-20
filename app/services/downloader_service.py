@@ -1,13 +1,18 @@
+import base64
+import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from Crypto.Cipher import DES
 import yt_dlp
 from app.models import MovieResult, Track
 
@@ -73,6 +78,88 @@ def download_cover_image(artwork_url: Optional[str], dest_folder: str) -> Option
         print(f"Error downloading cover image: {e}")
         return None
 
+def fetch_cdn_stream(track: Track, movie_folder: str, audio_quality: str, target_ext: str, safe_title: str) -> bool:
+    """Fetch direct full-length 320k/160k audio stream from Saavn high-speed CDN (unaffected by datacenter IP blocks)."""
+    queries = [
+        f"{track.movie} {track.title}",
+        f"{track.title} {track.artist}" if track.artist and "various" not in track.artist.lower() else f"{track.title} {track.movie}"
+    ]
+
+    final_file = os.path.join(movie_folder, f"{track.track_number:02d} - {safe_title}.{target_ext}")
+
+    for q in queries:
+        try:
+            url = f"https://www.jiosaavn.com/api.php?__call=search.getResults&_format=json&n=5&p=1&q={urllib.parse.quote_plus(q)}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=7.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                results = data.get("results", [])
+                if not results:
+                    continue
+                for item in results:
+                    enc = item.get("encrypted_media_url")
+                    if not enc:
+                        continue
+                    des = DES.new(b"38346591", DES.MODE_ECB)
+                    decrypted = des.decrypt(base64.b64decode(enc))
+                    pad = decrypted[-1]
+                    if isinstance(pad, int) and 0 < pad <= 8:
+                        decrypted = decrypted[:-pad]
+                    clean = decrypted.decode("utf-8", errors="ignore").strip()
+
+                    # Try 320k or 160k bitrate streams
+                    stream_urls = [
+                        clean.replace("_96.mp4", "_320.mp4"),
+                        clean.replace("_96.mp4", "_160.mp4"),
+                        clean
+                    ]
+
+                    raw_tmp = os.path.join(movie_folder, f".temp_{track.track_number}_{uuid.uuid4().hex[:6]}.m4a")
+
+                    downloaded = False
+                    for stream_url in stream_urls:
+                        try:
+                            dl_req = urllib.request.Request(stream_url, headers={"User-Agent": "Mozilla/5.0"})
+                            with urllib.request.urlopen(dl_req, timeout=12.0) as dl_resp, open(raw_tmp, "wb") as f:
+                                f.write(dl_resp.read())
+                            if os.path.exists(raw_tmp) and os.path.getsize(raw_tmp) > 500000:
+                                downloaded = True
+                                break
+                        except Exception:
+                            continue
+
+                    if not downloaded or not os.path.exists(raw_tmp):
+                        continue
+
+                    # Transcode using FFmpeg to requested format (MP3 or FLAC) with ID3 tags
+                    codec = "libmp3lame" if target_ext == "mp3" else "flac"
+                    bitrate = "320k" if audio_quality == "mp3_320" else ("192k" if target_ext == "mp3" else None)
+
+                    cmd = ["ffmpeg", "-y", "-i", raw_tmp, "-vn", "-c:a", codec]
+                    if bitrate:
+                        cmd.extend(["-b:a", bitrate])
+                    cmd.extend([
+                        "-metadata", f"title={track.title}",
+                        "-metadata", f"artist={track.artist}",
+                        "-metadata", f"album={track.album}",
+                        "-metadata", f"track={track.track_number}",
+                        final_file
+                    ])
+
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    if os.path.exists(raw_tmp):
+                        try:
+                            os.remove(raw_tmp)
+                        except Exception:
+                            pass
+
+                    if os.path.exists(final_file) and os.path.getsize(final_file) > 500000:
+                        return True
+        except Exception as e:
+            continue
+
+    return False
+
 def download_single_track(track: Track, movie_folder: str, audio_quality: str, cover_path: Optional[str] = None) -> bool:
     """Download a single full-length track in requested quality (FLAC, MP3 320k, or Fast MP3 192k)."""
     safe_title = sanitize_filename(track.title)
@@ -113,9 +200,15 @@ def download_single_track(track: Track, movie_folder: str, audio_quality: str, c
                 if os.path.getsize(fpath) > 500000:
                     return True
 
-    output_tmpl = os.path.join(movie_folder, f"{track.track_number:02d} - {safe_title}.%(ext)s")
+    # 1. Primary Engine: High-Speed Direct CDN Stream (unblocked on cloud/datacenter IPs)
+    try:
+        if fetch_cdn_stream(track, movie_folder, audio_quality, target_ext, safe_title):
+            return True
+    except Exception as e:
+        print(f"CDN fetch failed for {track.title}: {e}")
 
-    # yt-dlp pure audio extraction configuration (Fast stream, full track)
+    # 2. Secondary Engine: YouTube Audio Stream via yt-dlp
+    output_tmpl = os.path.join(movie_folder, f"{track.track_number:02d} - {safe_title}.%(ext)s")
     ydl_opts = {
         "format": "ba/b[ext=m4a]/ba*/best",
         "outtmpl": output_tmpl,
@@ -125,12 +218,11 @@ def download_single_track(track: Track, movie_folder: str, audio_quality: str, c
         "noplaylist": True,
         "default_search": "ytsearch1",
         "ignoreerrors": True,
-        "socket_timeout": 15,
+        "socket_timeout": 12,
         "retries": 1,
         "fragment_retries": 1,
     }
 
-    # Primary search query: Movie + Song Title + Artist + audio
     artist_part = f" {track.artist}" if track.artist and "various" not in track.artist.lower() else ""
     primary_query = f"ytsearch1:{track.movie} {track.title}{artist_part} audio"
 
@@ -140,7 +232,6 @@ def download_single_track(track: Track, movie_folder: str, audio_quality: str, c
     except Exception as e:
         print(f"Primary audio search failed for {track.title}: {e}")
 
-    # Check if download succeeded (>500KB indicates full song, not a short snippet)
     if os.path.exists(movie_folder):
         for f in os.listdir(movie_folder):
             if f.startswith(f"{track.track_number:02d} - {safe_title}.") and f.endswith(('.mp3', '.flac', '.m4a', '.wav', '.opus', '.aac')):
@@ -148,13 +239,13 @@ def download_single_track(track: Track, movie_folder: str, audio_quality: str, c
                 if os.path.getsize(fpath) > 500000:
                     return True
 
-    # Fallback search query if primary query didn't yield a file: Movie + Title + song
-    fallback_query = f"ytsearch1:{track.movie} {track.title} song"
+    # 3. Tertiary Engine: SoundCloud Search via yt-dlp (bypasses YouTube bot verification on cloud IPs)
+    sc_query = f"scsearch1:{track.movie} {track.title}"
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([fallback_query])
+            ydl.download([sc_query])
     except Exception as e:
-        print(f"Fallback audio search failed for {track.title}: {e}")
+        print(f"SoundCloud audio search failed for {track.title}: {e}")
 
     if os.path.exists(movie_folder):
         for f in os.listdir(movie_folder):
