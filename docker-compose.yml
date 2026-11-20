@@ -1,0 +1,12 @@
+services:
+  cinetracks:
+    build: .
+    container_name: cinetracks
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+    tmpfs:
+      - /tmp:size=4G
+
